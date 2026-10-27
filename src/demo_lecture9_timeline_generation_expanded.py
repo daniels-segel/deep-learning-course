@@ -172,7 +172,78 @@ class TimeSeriesVAE(nn.Module):
         z = self.reparameterize(mu, log_var)
         return self.decode(z), mu, log_var
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
+class Simple1DResBlockAE(nn.Module):
+    """A residual block for the Autoencoder (no time embedding needed)."""
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        self.conv1 = nn.Conv1d(in_ch, out_ch, 3, padding=1)
+        self.conv2 = nn.Conv1d(out_ch, out_ch, 3, padding=1)
+        self.res_conv = nn.Conv1d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
+
+    def forward(self, x):
+        h = self.conv1(F.gelu(x))
+        h = self.conv2(F.gelu(h))
+        return h + self.res_conv(x)
+
+
+class TimeSeriesUnetAE(nn.Module):
+    def __init__(self, in_channels, base_dim=32):
+        super().__init__()
+        
+        self.init_conv = nn.Conv1d(in_channels, base_dim, 3, padding=1)
+        
+        # --- Encoder Path ---
+        self.block1 = Simple1DResBlockAE(base_dim, base_dim * 2)       # Out: 64
+        self.down1 = nn.Conv1d(base_dim * 2, base_dim * 2, 4, stride=2, padding=1)
+        
+        self.block2 = Simple1DResBlockAE(base_dim * 2, base_dim * 4)   # Out: 128
+        self.down2 = nn.Conv1d(base_dim * 4, base_dim * 4, 4, stride=2, padding=1)
+        
+        # --- Bottleneck ---
+        self.bottleneck = Simple1DResBlockAE(base_dim * 4, base_dim * 8) # Out: 256
+        
+        # --- Decoder Path ---
+        self.up2 = nn.ConvTranspose1d(base_dim * 8, base_dim * 4, 4, stride=2, padding=1) # Out: 128
+        # cat2 = 128 (up2) + 128 (h2) = 256 channels
+        self.decode2 = Simple1DResBlockAE(base_dim * 8, base_dim * 2) # Out: 64
+        
+        self.up1 = nn.ConvTranspose1d(base_dim * 2, base_dim, 4, stride=2, padding=1)     # Out: 32
+        # cat1 = 32 (up1) + 64 (h1) = 96 channels
+        self.decode1 = Simple1DResBlockAE(base_dim + base_dim * 2, base_dim)             # Out: 32
+        
+        # Final reconstruction layer back to original channels
+        self.final_conv = nn.Conv1d(base_dim, in_channels, 3, padding=1)
+
+    def forward(self, x):
+        x0 = self.init_conv(x)
+        
+        # Encoder
+        h1 = self.block1(x0)           # 64 channels (Saved for skip 1)
+        x_d1 = self.down1(h1)
+        
+        h2 = self.block2(x_d1)         # 128 channels (Saved for skip 2)
+        x_d2 = self.down2(h2)
+        
+        # Bottleneck
+        bn = self.bottleneck(x_d2)     # 256 channels
+        
+        # Decoder Level 2
+        u2 = self.up2(bn)              # 128 channels
+        cat2 = torch.cat([u2, h2], dim=1) # 128 + 128 = 256 channels
+        d2 = self.decode2(cat2)        # 64 channels
+        
+        # Decoder Level 1
+        u1 = self.up1(d2)              # 32 channels
+        cat1 = torch.cat([u1, h1], dim=1) # 32 + 64 = 96 channels
+        d1 = self.decode1(cat1)        # 32 channels
+        
+        return self.final_conv(F.gelu(d1))
+    
+    
 # ==========================================
 # 3. TRAINING & INFERENCE ROUTINES
 # ==========================================
@@ -210,8 +281,8 @@ if __name__ == "__main__":
     print(f"Using device: {device}")
 
     # --- CONFIGURATION TOGGLES ---
-    DATASET_CHOICE = 'synthetic' # Options: 'synthetic' or 'cmapss'
-    MODEL_CHOICE = 'ae'   # Options: 'diffusion', 'ae', or 'vae'
+    DATASET_CHOICE = 'synthetic' # Options: 'synthetic' or 'cmapss' or 'unet'
+    MODEL_CHOICE = 'unet'   # Options: 'diffusion', 'ae', or 'vae'
     SEQ_LEN = 64
     EPOCHS = 100
 
@@ -233,6 +304,8 @@ if __name__ == "__main__":
         model = TimeSeriesAE(in_channels=in_channels, seq_len=SEQ_LEN).to(device)
     elif MODEL_CHOICE == 'vae':
         model = TimeSeriesVAE(in_channels=in_channels, seq_len=SEQ_LEN).to(device)
+    elif MODEL_CHOICE == 'unet':
+        model = TimeSeriesUnetAE(in_channels=in_channels).to(device)
         
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
@@ -252,7 +325,7 @@ if __name__ == "__main__":
                 pred_noise = model(noisy_x, t)
                 loss = F.mse_loss(pred_noise, noise)
                 
-            elif MODEL_CHOICE == 'ae':
+            elif MODEL_CHOICE == 'ae' or MODEL_CHOICE == 'unet':
                 recon = model(batch_x)
                 loss = F.mse_loss(recon, batch_x)
                 
@@ -261,7 +334,7 @@ if __name__ == "__main__":
                 recon_loss = F.mse_loss(recon, batch_x, reduction='sum')
                 kl_loss = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp())
                 loss = (recon_loss + kl_loss) / batch_x.size(0)
-                
+                    
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
@@ -272,7 +345,7 @@ if __name__ == "__main__":
     print("\nGenerating/Reconstructing samples for evaluation...")
     if MODEL_CHOICE == 'diffusion':
         generated_samples = sample_diffusion(model, (3, in_channels, SEQ_LEN), device)
-    elif MODEL_CHOICE == 'ae':
+    elif MODEL_CHOICE == 'ae' or MODEL_CHOICE == 'unet':
         model.eval()
         with torch.no_grad():
             generated_samples = model(raw_data[:3].to(device))
