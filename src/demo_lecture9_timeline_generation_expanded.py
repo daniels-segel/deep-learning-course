@@ -243,7 +243,61 @@ class TimeSeriesUnetAE(nn.Module):
         
         return self.final_conv(F.gelu(d1))
     
-    
+class SlimTimeSeriesUnetAE(nn.Module):
+    def __init__(self, in_channels=8, base_dim=8):
+        super().__init__()
+        self.init_conv = nn.Conv1d(in_channels, base_dim, 3, padding=1)
+        
+        # --- Encoder (128 -> 64 -> 32 -> 16) ---
+        self.block1 = Simple1DResBlockAE(base_dim, base_dim * 2)       # 16 ch, len 128
+        self.down1 = nn.Conv1d(base_dim * 2, base_dim * 2, 4, stride=2, padding=1)
+        
+        self.block2 = Simple1DResBlockAE(base_dim * 2, base_dim * 4)   # 32 ch, len 64
+        self.down2 = nn.Conv1d(base_dim * 4, base_dim * 4, 4, stride=2, padding=1)
+        
+        self.block3 = Simple1DResBlockAE(base_dim * 4, base_dim * 8)   # 64 ch, len 32
+        self.down3 = nn.Conv1d(base_dim * 8, base_dim * 8, 4, stride=2, padding=1)
+        
+        # --- Bottleneck (Length 16, 64 channels = 1,024 total values) ---
+        self.bottleneck = Simple1DResBlockAE(base_dim * 8, base_dim * 8)
+        
+        # --- Decoder (Upscaling back up) ---
+        self.up3 = nn.ConvTranspose1d(base_dim * 8, base_dim * 4, 4, stride=2, padding=1)
+        self.decode3 = Simple1DResBlockAE((base_dim * 8) + (base_dim * 4), base_dim * 4)
+        
+        self.up2 = nn.ConvTranspose1d(base_dim * 4, base_dim * 2, 4, stride=2, padding=1)
+        self.decode2 = Simple1DResBlockAE((base_dim * 4) + (base_dim * 2), base_dim * 2)
+        
+        self.up1 = nn.ConvTranspose1d(base_dim * 2, base_dim, 4, stride=2, padding=1)
+        self.decode1 = Simple1DResBlockAE((base_dim * 2) + base_dim, base_dim)
+        
+        self.final_conv = nn.Conv1d(base_dim, in_channels, 3, padding=1)
+
+    def forward(self, x):
+        x0 = self.init_conv(x)
+        
+        h1 = self.block1(x0)
+        x_d1 = self.down1(h1)
+        
+        h2 = self.block2(x_d1)
+        x_d2 = self.down2(h2)
+        
+        h3 = self.block3(x_d2)
+        x_d3 = self.down3(h3)
+        
+        bn = self.bottleneck(x_d3)  # Shape: [Batch, 64, 16] -> 1,024 values
+        
+        u3 = self.up3(bn)
+        d3 = self.decode3(torch.cat([u3, h3], dim=1))
+        
+        u2 = self.up2(d3)
+        d2 = self.decode2(torch.cat([u2, h2], dim=1))
+        
+        u1 = self.up1(d2)
+        d1 = self.decode1(torch.cat([u1, h1], dim=1))
+        
+        return self.final_conv(F.gelu(d1))
+        
 # ==========================================
 # 3. TRAINING & INFERENCE ROUTINES
 # ==========================================
@@ -282,9 +336,9 @@ if __name__ == "__main__":
 
     # --- CONFIGURATION TOGGLES ---
     DATASET_CHOICE = 'synthetic' # Options: 'synthetic' or 'cmapss' or 'unet'
-    MODEL_CHOICE = 'unet'   # Options: 'diffusion', 'ae', or 'vae'
+    MODEL_CHOICE = 'unet_slim'   # Options: 'diffusion', 'ae', 'unet', 'unet_slim' or 'vae'
     SEQ_LEN = 64
-    EPOCHS = 100
+    EPOCHS = 50
 
     # Step 1: Load Dataset
     if DATASET_CHOICE == 'synthetic':
@@ -306,6 +360,8 @@ if __name__ == "__main__":
         model = TimeSeriesVAE(in_channels=in_channels, seq_len=SEQ_LEN).to(device)
     elif MODEL_CHOICE == 'unet':
         model = TimeSeriesUnetAE(in_channels=in_channels).to(device)
+    elif MODEL_CHOICE == 'unet_slim':
+        model = SlimTimeSeriesUnetAE(in_channels=in_channels).to(device)
         
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
@@ -325,7 +381,7 @@ if __name__ == "__main__":
                 pred_noise = model(noisy_x, t)
                 loss = F.mse_loss(pred_noise, noise)
                 
-            elif MODEL_CHOICE == 'ae' or MODEL_CHOICE == 'unet':
+            elif MODEL_CHOICE == 'ae' or MODEL_CHOICE == 'unet' or MODEL_CHOICE == 'unet_slim':
                 recon = model(batch_x)
                 loss = F.mse_loss(recon, batch_x)
                 
@@ -345,7 +401,7 @@ if __name__ == "__main__":
     print("\nGenerating/Reconstructing samples for evaluation...")
     if MODEL_CHOICE == 'diffusion':
         generated_samples = sample_diffusion(model, (3, in_channels, SEQ_LEN), device)
-    elif MODEL_CHOICE == 'ae' or MODEL_CHOICE == 'unet':
+    elif MODEL_CHOICE == 'ae' or MODEL_CHOICE == 'unet' or MODEL_CHOICE == 'unet_slim':
         model.eval()
         with torch.no_grad():
             generated_samples = model(raw_data[:3].to(device))
