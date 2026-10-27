@@ -211,9 +211,9 @@ if __name__ == "__main__":
 
     # --- CONFIGURATION TOGGLES ---
     DATASET_CHOICE = 'synthetic' # Options: 'synthetic' or 'cmapss'
-    MODEL_CHOICE = 'diffusion'   # Options: 'diffusion', 'ae', or 'vae'
+    MODEL_CHOICE = 'ae'   # Options: 'diffusion', 'ae', or 'vae'
     SEQ_LEN = 64
-    EPOCHS = 5
+    EPOCHS = 100
 
     # Step 1: Load Dataset
     if DATASET_CHOICE == 'synthetic':
@@ -221,7 +221,7 @@ if __name__ == "__main__":
         raw_data = generate_synthetic_sensor_data(num_samples=1000, channels=3, length=SEQ_LEN)
     elif DATASET_CHOICE == 'cmapss':
         print("Loading NASA C-MAPSS Dataset (train_FD001.txt)...")
-        raw_data = load_cmapss_data(r'.\data\train_FD001.txt', seq_len=SEQ_LEN)
+        raw_data = load_cmapss_data(r'..\data\train_FD001.txt', seq_len=SEQ_LEN)
         
     in_channels = raw_data.shape[1]
     dataloader = DataLoader(raw_data, batch_size=32, shuffle=True)
@@ -280,18 +280,19 @@ if __name__ == "__main__":
         generated_samples = sample_vae(model, 3, in_channels, SEQ_LEN, device)
 
     # Step 5: Plotting Results
-    fig, axes = plt.subplots(2, 3, figsize=(15, 6), sharey=True)
-    for i in range(3):
-        # Real
-        axes[0, i].plot(raw_data[i, 0].cpu().numpy(), color='tab:blue', lw=2)
-        axes[0, i].set_title(f"Real Sample {i+1}")
-        axes[0, i].grid(True, alpha=0.3)
+    for show_channel in range(in_channels):
+        fig, axes = plt.subplots(2, 3, figsize=(15, 6), sharey=True)
+        for i in range(3):
+            # Real
+            axes[0, i].plot(raw_data[i, show_channel].cpu().numpy(), color='tab:blue', lw=2)
+            axes[0, i].set_title(f"Real Sample {i+1}")
+            axes[0, i].grid(True, alpha=0.3)
+            
+            # Generated / Reconstructed
+            axes[1, i].plot(generated_samples[i, show_channel].cpu().numpy(), color='tab:orange', lw=2)
+            axes[1, i].set_title(f"{MODEL_CHOICE.upper()} Output {i+1}")
+            axes[1, i].grid(True, alpha=0.3)
         
-        # Generated / Reconstructed
-        axes[1, i].plot(generated_samples[i, 0].cpu().numpy(), color='tab:orange', lw=2)
-        axes[1, i].set_title(f"{MODEL_CHOICE.upper()} Output {i+1}")
-        axes[1, i].grid(True, alpha=0.3)
-        
-    plt.suptitle(f"Model: {MODEL_CHOICE.upper()} | Dataset: {DATASET_CHOICE.upper()} (Channel 0)", fontsize=14)
-    plt.tight_layout()
-    plt.show()
+        plt.suptitle(f"Model: {MODEL_CHOICE.upper()} | Dataset: {DATASET_CHOICE.upper()} (Channel {show_channel})", fontsize=14)
+        plt.tight_layout()
+        plt.show()
