@@ -243,9 +243,11 @@ class TimeSeriesUnetAE(nn.Module):
         
         return self.final_conv(F.gelu(d1))
     
+  
 class SlimTimeSeriesUnetAE(nn.Module):
     def __init__(self, in_channels=8, base_dim=8):
         super().__init__()
+        # kernel of width 3, turn into 8 channels
         self.init_conv = nn.Conv1d(in_channels, base_dim, 3, padding=1)
         
         # --- Encoder (128 -> 64 -> 32 -> 16) ---
@@ -255,21 +257,16 @@ class SlimTimeSeriesUnetAE(nn.Module):
         self.block2 = Simple1DResBlockAE(base_dim * 2, base_dim * 4)   # 32 ch, len 64
         self.down2 = nn.Conv1d(base_dim * 4, base_dim * 4, 4, stride=2, padding=1)
         
-        self.block3 = Simple1DResBlockAE(base_dim * 4, base_dim * 8)   # 64 ch, len 32
-        self.down3 = nn.Conv1d(base_dim * 8, base_dim * 8, 4, stride=2, padding=1)
-        
         # --- Bottleneck (Length 16, 64 channels = 1,024 total values) ---
-        self.bottleneck = Simple1DResBlockAE(base_dim * 8, base_dim * 8)
+        self.bottleneck = Simple1DResBlockAE(base_dim * 4, base_dim * 4)
         
         # --- Decoder (Upscaling back up) ---
-        self.up3 = nn.ConvTranspose1d(base_dim * 8, base_dim * 4, 4, stride=2, padding=1)
-        self.decode3 = Simple1DResBlockAE((base_dim * 8) + (base_dim * 4), base_dim * 4)
-        
         self.up2 = nn.ConvTranspose1d(base_dim * 4, base_dim * 2, 4, stride=2, padding=1)
         self.decode2 = Simple1DResBlockAE((base_dim * 4) + (base_dim * 2), base_dim * 2)
         
         self.up1 = nn.ConvTranspose1d(base_dim * 2, base_dim, 4, stride=2, padding=1)
         self.decode1 = Simple1DResBlockAE((base_dim * 2) + base_dim, base_dim)
+        
         
         self.final_conv = nn.Conv1d(base_dim, in_channels, 3, padding=1)
 
@@ -282,22 +279,103 @@ class SlimTimeSeriesUnetAE(nn.Module):
         h2 = self.block2(x_d1)
         x_d2 = self.down2(h2)
         
-        h3 = self.block3(x_d2)
-        x_d3 = self.down3(h3)
+        bn = self.bottleneck(x_d2)  # Shape: [Batch, 64, 16] -> 1,024 values
         
-        bn = self.bottleneck(x_d3)  # Shape: [Batch, 64, 16] -> 1,024 values
-        
-        u3 = self.up3(bn)
-        d3 = self.decode3(torch.cat([u3, h3], dim=1))
-        
-        u2 = self.up2(d3)
+        u2 = self.up2(bn)
         d2 = self.decode2(torch.cat([u2, h2], dim=1))
         
         u1 = self.up1(d2)
         d1 = self.decode1(torch.cat([u1, h1], dim=1))
         
         return self.final_conv(F.gelu(d1))
+
+import torch
+import matplotlib.pyplot as plt
+import numpy as np
+
+@torch.no_grad()
+def sample_diffusion_trajectory(model, n_steps, shape, betas, alphas, alphas_cumprod):
+    """
+    Runs the reverse diffusion process and records intermediate states 
+    to visualize how the timeline develops from noise.
+    """
+    device = next(model.parameters()).device
+    
+    # 1. Start from pure Gaussian noise (Step T)
+    x = torch.randn(shape, device=device)
+    
+    # Select specific iterations to save for visualization (e.g., 10 snapshots)
+    save_steps = set(torch.linspace(n_steps - 1, 0, steps=10).long().tolist())
+    trajectory = []
+    
+    # Save the initial noise state
+    if (n_steps - 1) in save_steps:
+        trajectory.append((n_steps - 1, x.detach().cpu().numpy()))
+    
+    # 2. Reverse loop from T down to 1
+    for i in reversed(range(n_steps)):
+        t = torch.full((shape[0],), i, device=device, dtype=torch.long)
         
+        # Model predicts the noise added at step i
+        predicted_noise = model(x, t)
+        
+        # Standard DDPM reverse coefficients
+        alpha = alphas[i]
+        alpha_cumprod = alphas_cumprod[i]
+        beta = betas[i]
+        
+        if i > 0:
+            noise = torch.randn_like(x)
+        else:
+            noise = torch.zeros_like(x)
+            
+        # Compute the mean and step backward to x_{t-1}
+        coef1 = 1.0 / torch.sqrt(alpha)
+        coef2 = (1.0 - alpha) / torch.sqrt(1.0 - alpha_cumprod)
+        x = coef1 * (x - coef2 * predicted_noise) + torch.sqrt(beta) * noise
+        
+        # Capture snapshot if it's a designated visualization step
+        if i in save_steps or i == 0:
+            trajectory.append((i, x.detach().cpu().numpy()))
+            
+    return trajectory
+
+def plot_trajectory_evolution(trajectory, channel_idx=0):
+    """
+    Sequentially displays the trajectory snapshots one by one, 
+    showing each for 0.5 seconds without requiring human intervention.
+    """
+    # Turn on interactive mode for live plotting/animation
+    plt.ion()
+    fig, ax = plt.subplots(figsize=(10, 5))
+    
+    # Sort trajectory from high noise (T) down to final structure (Step 0)
+    sorted_trajectory = sorted(trajectory, key=lambda x: x[0], reverse=True)
+    
+    for step, sample in sorted_trajectory:
+        ax.clear()  # Clear the previous step's line
+        
+        # Extract batch item 0, specific channel/feature
+        timeline = sample[0, channel_idx] if sample.ndim == 3 else sample[0]
+        
+        # Plot the current step
+        ax.plot(timeline, color='tab:blue', linewidth=2)
+        
+        # Set titles and formatting
+        title = f"Diffusion Step {step}" if step > 0 else "Final Output (Step 0)"
+        ax.set_title(f"Trajectory Evolution: {title}", fontsize=12)
+        ax.set_xlabel("Time Steps in Window", fontsize=10)
+        ax.set_ylabel("Sensor Amplitude", fontsize=10)
+        ax.grid(True, linestyle='--', alpha=0.5)
+        
+        # Refresh the canvas and pause for 0.5 seconds
+        plt.draw()
+        plt.pause(0.5)
+        
+    # Turn off interactive mode and keep the final window open at the end
+    plt.ioff()
+    plt.show(block=True)
+
 # ==========================================
 # 3. TRAINING & INFERENCE ROUTINES
 # ==========================================
@@ -336,20 +414,23 @@ if __name__ == "__main__":
 
     # --- CONFIGURATION TOGGLES ---
     DATASET_CHOICE = 'synthetic' # Options: 'synthetic' or 'cmapss' or 'unet'
-    MODEL_CHOICE = 'unet_slim'   # Options: 'diffusion', 'ae', 'unet', 'unet_slim' or 'vae'
+    MODEL_CHOICE = 'diffusion'   # Options: 'diffusion', 'ae', 'unet', 'unet_slim' or 'vae'
     SEQ_LEN = 64
-    EPOCHS = 50
+    EPOCHS = 100
+    N_CHANNELS_CMAPSS = 14
+    N_CHANNELS_SYNTH = 3
+    BATCH_SIZE = 32
 
     # Step 1: Load Dataset
     if DATASET_CHOICE == 'synthetic':
         print("Using Synthetic Dataset...")
-        raw_data = generate_synthetic_sensor_data(num_samples=1000, channels=3, length=SEQ_LEN)
+        raw_data = generate_synthetic_sensor_data(num_samples=1000, channels=N_CHANNELS_SYNTH, length=SEQ_LEN)
     elif DATASET_CHOICE == 'cmapss':
         print("Loading NASA C-MAPSS Dataset (train_FD001.txt)...")
         raw_data = load_cmapss_data(r'..\data\train_FD001.txt', seq_len=SEQ_LEN)
         
     in_channels = raw_data.shape[1]
-    dataloader = DataLoader(raw_data, batch_size=32, shuffle=True)
+    dataloader = DataLoader(raw_data, batch_size=BATCH_SIZE, shuffle=True)
 
     # Step 2: Initialize Model
     if MODEL_CHOICE == 'diffusion':
@@ -388,6 +469,7 @@ if __name__ == "__main__":
             elif MODEL_CHOICE == 'vae':
                 recon, mu, log_var = model(batch_x)
                 recon_loss = F.mse_loss(recon, batch_x, reduction='sum')
+# KL loss: sum over batches and over latent space dimension
                 kl_loss = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp())
                 loss = (recon_loss + kl_loss) / batch_x.size(0)
                     
@@ -401,6 +483,27 @@ if __name__ == "__main__":
     print("\nGenerating/Reconstructing samples for evaluation...")
     if MODEL_CHOICE == 'diffusion':
         generated_samples = sample_diffusion(model, (3, in_channels, SEQ_LEN), device)
+
+                # Example configuration values (match whatever you used during training)
+        #N_CHANNELS = 14  # e.g., number of C-MAPSS sensor channels
+        n_channels = generated_samples.shape[1]
+        shape = (BATCH_SIZE, n_channels, SEQ_LEN)
+
+        # 1. Put your trained model into evaluation mode
+        model.eval()
+
+        # 2. Run the trajectory sampler to capture evolution steps
+        trajectory = sample_diffusion_trajectory(
+            model=model, 
+            n_steps=TIMESTEPS, 
+            shape=shape, 
+            betas=beta,           # Your pre-defined beta schedule tensor
+            alphas=alpha,         # Your pre-defined alpha schedule tensor
+            alphas_cumprod=alpha_cumprod  # Your pre-defined cumulative alpha tensor
+        )
+
+        # 3. Visualize how the noise shaped itself into a telemetry window
+        plot_trajectory_evolution(trajectory, channel_idx=2)
     elif MODEL_CHOICE == 'ae' or MODEL_CHOICE == 'unet' or MODEL_CHOICE == 'unet_slim':
         model.eval()
         with torch.no_grad():
