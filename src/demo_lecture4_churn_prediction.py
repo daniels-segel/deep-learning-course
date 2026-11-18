@@ -149,6 +149,38 @@ def analyze_layers(model):
             # if tenure is short and bill is high, high risk
             print(f"   <- W1 weights: tenure={W1[i,0]:+.2f}, Monthly={W1[i,1]:+.2f}, Total={W1[i,2]:+.2f}")
 
+def do_plots(model):
+
+    # 1. Create a hook or sub-model to extract 16-D hidden layer activations
+    sub_model = nn.Sequential(*list(model.net.children())[:2]) # Keeps Linear(3,16) + ReLU
+
+    model.eval()
+    with torch.no_grad():
+        hidden_embeddings = sub_model(X_test_tensor).cpu().numpy() # Shape: (N_test, 16)
+        y_test_np = y_test_tensor.squeeze().cpu().numpy()
+
+    # 2. Reduce 16D embeddings to 2D using PCA
+
+    embeddings_2d = pca.fit_transform(hidden_embeddings)
+
+    # 3. Plot the learned latent space
+    plt.figure(figsize=(8, 6))
+    plt.scatter(
+        embeddings_2d[y_test_np == 0, 0], 
+        embeddings_2d[y_test_np == 0, 1], 
+        c='blue', alpha=0.4, label='Retained (0)', s=20
+    )
+    plt.scatter(
+        embeddings_2d[y_test_np == 1, 0], 
+        embeddings_2d[y_test_np == 1, 1], 
+        c='red', alpha=0.6, label='Churned (1)', s=20
+    )
+    plt.title(f"Learned Hidden Layer Representations ({hidden_nodes}D -> 2D PCA)")
+    plt.xlabel("Principal Component 1")
+    plt.ylabel("Principal Component 2")
+    plt.legend()
+    plt.grid(True, linestyle='--', alpha=0.5)
+    plt.show()
 
 model = ChurnMLP(input_dim=X_train.shape[1])
 criterion = nn.BCEWithLogitsLoss()
@@ -189,33 +221,3 @@ with open("output.txt", "w") as f:
         assess_performance(test_predictions, y_test_tensor, df)
         analyze_layers(model)
 
-# 1. Create a hook or sub-model to extract 16-D hidden layer activations
-sub_model = nn.Sequential(*list(model.net.children())[:2]) # Keeps Linear(3,16) + ReLU
-
-model.eval()
-with torch.no_grad():
-    hidden_embeddings = sub_model(X_test_tensor).cpu().numpy() # Shape: (N_test, 16)
-    y_test_np = y_test_tensor.squeeze().cpu().numpy()
-
-# 2. Reduce 16D embeddings to 2D using PCA
-
-embeddings_2d = pca.fit_transform(hidden_embeddings)
-
-# 3. Plot the learned latent space
-plt.figure(figsize=(8, 6))
-plt.scatter(
-    embeddings_2d[y_test_np == 0, 0], 
-    embeddings_2d[y_test_np == 0, 1], 
-    c='blue', alpha=0.4, label='Retained (0)', s=20
-)
-plt.scatter(
-    embeddings_2d[y_test_np == 1, 0], 
-    embeddings_2d[y_test_np == 1, 1], 
-    c='red', alpha=0.6, label='Churned (1)', s=20
-)
-plt.title(f"Learned Hidden Layer Representations ({hidden_nodes}D -> 2D PCA)")
-plt.xlabel("Principal Component 1")
-plt.ylabel("Principal Component 2")
-plt.legend()
-plt.grid(True, linestyle='--', alpha=0.5)
-plt.show()
