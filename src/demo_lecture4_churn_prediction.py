@@ -36,7 +36,7 @@ def read_data_basic(data_input_file):
 
     return df, X_raw, y_raw
 
-def read_data_advanced():
+def read_data_advanced(data_input_file):
 
     df_full = pd.read_csv(data_input_file)
 
@@ -168,7 +168,7 @@ def analyze_layers(model, layer_index):
             # if tenure is short and bill is high, high risk
             print(f"   <- W1 weights: tenure={W1[i,0]:+.2f}, Monthly={W1[i,1]:+.2f}, Total={W1[i,2]:+.2f}")
 
-def do_plots(model, X_test_tensor, y_test_tensor, pca):
+def do_plots(model, X_test_tensor, y_test_tensor, pca, plot_name):
 
     # 1. Create a hook or sub-model to extract 16-D hidden layer activations
     sub_model = nn.Sequential(*list(model.net.children())[:2]) # Keeps Linear(3,16) + ReLU
@@ -200,7 +200,9 @@ def do_plots(model, X_test_tensor, y_test_tensor, pca):
     plt.ylabel("Principal Component 2")
     plt.legend()
     plt.grid(True, linestyle='--', alpha=0.5)
-    plt.show()
+#    plt.show()
+
+    plt.savefig(plot_name, dpi=300, bbox_inches="tight")
 
 
 def main():
@@ -215,8 +217,9 @@ def main():
     hidden_nodes = 16
     epochs = 100
     prediction_threshold = 0.2
-    mode_advanced = True
+    mode_advanced = False
     pca = PCA(n_components=2)
+    out_string = 'basic'
 
     df, X_raw, y_raw = read_data_basic(data_input_file)
 
@@ -274,11 +277,13 @@ def main():
     # Convert probabilities to discrete binary predictions (0 or 1) using a 0.5 threshold
     test_predictions = (test_probabilities >= prediction_threshold).float()
 
-    with open("output.txt", "w") as f:
+    data_output_name = f'output_{out_string}.txt'
+    with open(data_output_name, "w") as f:
         with redirect_stdout(f):
             assess_performance(test_predictions, test_probabilities, y_test_tensor, df)
             analyze_layers(model, layer_index)
-    do_plots(model, X_test_tensor, y_test_tensor, pca)
+    plot_name = f'plot_{out_string}.png'
+    do_plots(model, X_test_tensor, y_test_tensor, pca, plot_name)
 
 if __name__ == "__main__":
 
