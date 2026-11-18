@@ -142,11 +142,11 @@ def assess_performance(test_predictions, test_probabilities, y_test_tensor, df):
     # plt.legend(['test','GT'])
     # plt.show()
 
-def analyze_layers(model):
+def analyze_layers(model, layer_index):
     # W1 shape: (16, 3), W2 shape: (1, 16)
     # model.net[1] is the RELU layer
     W1 = model.net[0].weight.detach().cpu().numpy()
-    W2 = model.net[2].weight.detach().numpy().squeeze()
+    W2 = model.net[layer_index].weight.detach().numpy().squeeze()
 
     # Calculate average absolute importance per input feature
     feature_names = ['tenure', 'MonthlyCharges', 'TotalCharges']
@@ -215,6 +215,7 @@ def main():
     hidden_nodes = 16
     epochs = 100
     prediction_threshold = 0.2
+    mode_advanced = True
     pca = PCA(n_components=2)
 
     df, X_raw, y_raw = read_data_basic(data_input_file)
@@ -235,7 +236,12 @@ def main():
     X_test_tensor = torch.tensor(X_test, dtype=torch.float32)
     y_test_tensor = torch.tensor(y_test, dtype=torch.float32).unsqueeze(1)
 
-    model = ChurnMLP(input_dim=X_train.shape[1], hidden_nodes=hidden_nodes)
+    if not mode_advanced:
+        layer_index = 2
+        model = ChurnMLP(input_dim=X_train.shape[1], hidden_nodes=hidden_nodes)
+    else:
+        layer_index = 8
+        model = ImprovedChurnMLP(input_dim=X_train.shape[1], hidden_nodes=hidden_nodes)
     criterion = nn.BCEWithLogitsLoss()
     optimizer = optim.Adam(model.parameters(), lr=0.01)
 
@@ -271,7 +277,7 @@ def main():
     with open("output.txt", "w") as f:
         with redirect_stdout(f):
             assess_performance(test_predictions, test_probabilities, y_test_tensor, df)
-            analyze_layers(model)
+            analyze_layers(model, layer_index)
     do_plots(model, X_test_tensor, y_test_tensor, pca)
 
 if __name__ == "__main__":
