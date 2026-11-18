@@ -22,48 +22,47 @@ def fix_data(df, channels_used):
 
     return df[channels_used]
 
+def read_data_basic(data_input_file):
 
-# ==========================================
-# 1. READ IN THE DATA
-# ==========================================
+    channels_used = ['tenure', 'MonthlyCharges', 'TotalCharges', 'TechSupport', 'Churn']
+    # Load raw tabular data from a CSV file, here treat all channels for completeness
+    df_full = pd.read_csv(data_input_file)
+    channels_used = ['tenure', 'MonthlyCharges', 'TotalCharges', 'Churn']
+    df = fix_data(df_full, channels_used)
 
-#channels_used = ['tenure', 'MonthlyCharges', 'TotalCharges', 'Contract', 'PaymentMethod', 'Churn']
-channels_used = ['tenure', 'MonthlyCharges', 'TotalCharges', 'TechSupport', 'Churn']
-hidden_nodes = 16
-epochs = 100
-prediction_threshold = 0.2
+    # Separate features (X) and target label (y)
+    X_raw = df.drop(columns=["Churn"]).values
+    y_raw = df["Churn"].values
 
-pca = PCA(n_components=2)
-# Load raw tabular data from a CSV file, here treat all channels for completeness
-df_full = pd.read_csv(r'C:\Users\DanielS\.cache\kagglehub\datasets\maqeel732\wa-fn-usec-telco-customer-churn-csv\versions\1\WA_Fn-UseC_-Telco-Customer-Churn.csv')
-channels_used = ['tenure', 'MonthlyCharges', 'TotalCharges', 'Churn']
-df = fix_data(df_full, channels_used)
+    return df, X_raw, y_raw
 
-# Separate features (X) and target label (y)
-X_raw = df.drop(columns=["Churn"]).values
-y_raw = df["Churn"].values
+def read_data_advanced():
 
-# Train/Test Split
-X_train, X_test, y_train, y_test = train_test_split(X_raw, y_raw, test_size=0.2, random_state=42)
+    df_full = pd.read_csv(data_input_file)
 
-# Preprocessing: Scale continuous features (Z-score normalization)
-scaler = StandardScaler()
-X_train = scaler.fit_transform(X_train) # find scale and offset which are saved in class, and also operate on array
-X_test = scaler.transform(X_test)
+    # Drop unique ID column (no predictive value)
+    df = df_full.drop(columns=['customerID'])
 
-# Convert NumPy arrays to PyTorch Tensors (float32 required for linear layers)
-X_train_tensor = torch.tensor(X_train, dtype=torch.float32)
-y_train_tensor = torch.tensor(y_train, dtype=torch.float32).unsqueeze(1) # Shape: (N, 1)
+    # Convert target 'Churn' to binary 0/1
+    df['Churn'] = (df['Churn'] == 'Yes').astype(int)
 
-X_test_tensor = torch.tensor(X_test, dtype=torch.float32)
-y_test_tensor = torch.tensor(y_test, dtype=torch.float32).unsqueeze(1)
+    # Fix blank strings in TotalCharges and drop missing rows
+    df['TotalCharges'] = pd.to_numeric(df['TotalCharges'], errors='coerce')
+    df = df.dropna()
+
+    # One-hot encode categorical columns into 0/1 flags
+    df_encoded = pd.get_dummies(df, drop_first=True)
+
+    # Separate features (X) and target (y)
+    X_raw = df_encoded.drop(columns=['Churn']).values.astype(np.float32)
+    y_raw = df_encoded['Churn'].values.astype(np.float32)
 
 
 # ==========================================
 # 2. MODEL DEFINITION & SETUP
 # ==========================================
 class ChurnMLP(nn.Module):
-    def __init__(self, input_dim):
+    def __init__(self, input_dim, hidden_nodes):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(input_dim, hidden_nodes),
@@ -75,7 +74,27 @@ class ChurnMLP(nn.Module):
     def forward(self, x):
         return self.net(x)
 
-def assess_performance(test_predictions, y_test_tensor, df):
+class ImprovedChurnMLP(nn.Module):
+    def __init__(self, input_dim, hidden_nodes, dropout_rate=0.25):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, 64),
+            nn.BatchNorm1d(64),
+            nn.SiLU(),
+            nn.Dropout(dropout_rate),
+            
+            nn.Linear(64, 32),
+            nn.BatchNorm1d(32),
+            nn.SiLU(),
+            nn.Dropout(dropout_rate),
+            
+            nn.Linear(32, 1)
+        )
+        
+    def forward(self, x):
+        return self.net(x)
+
+def assess_performance(test_predictions, test_probabilities, y_test_tensor, df):
 
     # Calculate classification accuracy
     correct = (test_predictions == y_test_tensor).sum().item()
@@ -138,7 +157,7 @@ def analyze_layers(model):
         print(f"Feature: {name:<15} | Avg |W1|: {importance:.4f}")
 
     print("--- Level 2: Hidden Unit Role Decomposition ---")
-    for i in range(hidden_nodes):
+    for i in range(W2.shape[0]):
         w2_val = W2[i] # Contribution of unit i to output logit
         # Only inspect active neurons that strongly push prediction positive or negative
         if abs(w2_val) > 0.2:
@@ -149,7 +168,7 @@ def analyze_layers(model):
             # if tenure is short and bill is high, high risk
             print(f"   <- W1 weights: tenure={W1[i,0]:+.2f}, Monthly={W1[i,1]:+.2f}, Total={W1[i,2]:+.2f}")
 
-def do_plots(model):
+def do_plots(model, X_test_tensor, y_test_tensor, pca):
 
     # 1. Create a hook or sub-model to extract 16-D hidden layer activations
     sub_model = nn.Sequential(*list(model.net.children())[:2]) # Keeps Linear(3,16) + ReLU
@@ -162,7 +181,8 @@ def do_plots(model):
     # 2. Reduce 16D embeddings to 2D using PCA
 
     embeddings_2d = pca.fit_transform(hidden_embeddings)
-
+    
+    hidden_nodes = hidden_embeddings.shape[1]
     # 3. Plot the learned latent space
     plt.figure(figsize=(8, 6))
     plt.scatter(
@@ -182,42 +202,78 @@ def do_plots(model):
     plt.grid(True, linestyle='--', alpha=0.5)
     plt.show()
 
-model = ChurnMLP(input_dim=X_train.shape[1])
-criterion = nn.BCEWithLogitsLoss()
-optimizer = optim.Adam(model.parameters(), lr=0.01)
+
+def main():
+
+    data_input_file = r'C:\Users\DanielS\.cache\kagglehub\datasets\maqeel732\wa-fn-usec-telco-customer-churn-csv\versions\1\WA_Fn-UseC_-Telco-Customer-Churn.csv'
+
+    # ==========================================
+    # 1. READ IN THE DATA
+    # ==========================================
+
+    #channels_used = ['tenure', 'MonthlyCharges', 'TotalCharges', 'Contract', 'PaymentMethod', 'Churn']
+    hidden_nodes = 16
+    epochs = 100
+    prediction_threshold = 0.2
+    pca = PCA(n_components=2)
+
+    df, X_raw, y_raw = read_data_basic(data_input_file)
+
+    # Train/Test Split
+    # stratify=y_raw in train_test_split: Guarantees that both y_train_t and y_test_t preserve the exact same 26.5% churn ratio
+    X_train, X_test, y_train, y_test = train_test_split(X_raw, y_raw, test_size=0.2, random_state=42, stratify=y_raw)
+
+    # Preprocessing: Scale continuous features (Z-score normalization)
+    scaler = StandardScaler()
+    X_train = scaler.fit_transform(X_train) # find scale and offset which are saved in class, and also operate on array
+    X_test = scaler.transform(X_test)
+
+    # Convert NumPy arrays to PyTorch Tensors (float32 required for linear layers)
+    X_train_tensor = torch.tensor(X_train, dtype=torch.float32)
+    y_train_tensor = torch.tensor(y_train, dtype=torch.float32).unsqueeze(1) # Shape: (N, 1)
+
+    X_test_tensor = torch.tensor(X_test, dtype=torch.float32)
+    y_test_tensor = torch.tensor(y_test, dtype=torch.float32).unsqueeze(1)
+
+    model = ChurnMLP(input_dim=X_train.shape[1], hidden_nodes=hidden_nodes)
+    criterion = nn.BCEWithLogitsLoss()
+    optimizer = optim.Adam(model.parameters(), lr=0.01)
 
 
-# ==========================================
-# 3. TRAINING LOOP
-# ==========================================
-for epoch in range(epochs):
-    print(f'Epoch {epoch}')
-    model.train()
-    
-    # Forward Pass
-    y_pred = model(X_train_tensor)
-    loss = criterion(y_pred, y_train_tensor)
-    
-    # Backward Pass & Optimization
-    optimizer.zero_grad()
-    loss.backward()
-    optimizer.step()
+    # ==========================================
+    # 3. TRAINING LOOP
+    # ==========================================
+    for epoch in range(epochs):
+        print(f'Epoch {epoch}')
+        model.train()
+        
+        # Forward Pass
+        y_pred = model(X_train_tensor)
+        loss = criterion(y_pred, y_train_tensor)
+        
+        # Backward Pass & Optimization
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
 
+    # ==========================================
+    # 4. SEE THE RESULTS (EVALUATION / INFERENCE)
+    # ==========================================
+    model.eval() # Set model to evaluation mode
 
-# ==========================================
-# 4. SEE THE RESULTS (EVALUATION / INFERENCE)
-# ==========================================
-model.eval() # Set model to evaluation mode
+    with torch.no_grad(): # Disable gradient computation for speed & memory efficiency
+        # Get continuous probability outputs (between 0.0 and 1.0)
+        test_probabilities = model(X_test_tensor)
+        
+    # Convert probabilities to discrete binary predictions (0 or 1) using a 0.5 threshold
+    test_predictions = (test_probabilities >= prediction_threshold).float()
 
-with torch.no_grad(): # Disable gradient computation for speed & memory efficiency
-    # Get continuous probability outputs (between 0.0 and 1.0)
-    test_probabilities = model(X_test_tensor)
-    
-# Convert probabilities to discrete binary predictions (0 or 1) using a 0.5 threshold
-test_predictions = (test_probabilities >= prediction_threshold).float()
+    with open("output.txt", "w") as f:
+        with redirect_stdout(f):
+            assess_performance(test_predictions, test_probabilities, y_test_tensor, df)
+            analyze_layers(model)
+    do_plots(model, X_test_tensor, y_test_tensor, pca)
 
-with open("output.txt", "w") as f:
-    with redirect_stdout(f):
-        assess_performance(test_predictions, y_test_tensor, df)
-        analyze_layers(model)
+if __name__ == "__main__":
 
+    main()
