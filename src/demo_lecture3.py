@@ -23,7 +23,7 @@ def grad_f(x, y, h=1e-5):
 # ==========================================
 # 2. Optimization Parameters & Initial Point
 # ==========================================
-start_point = np.array([-0.5, 0])  # Step 2: Initial point
+start_point = np.array([-2.5, 0])  # Step 2: Initial point
 learning_rate = 0.002               # Step size factor
 iterations = 4000
 

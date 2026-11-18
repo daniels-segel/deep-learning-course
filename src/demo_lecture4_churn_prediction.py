@@ -7,12 +7,17 @@ from sklearn.preprocessing import StandardScaler
 import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.decomposition import PCA
+from contextlib import redirect_stdout
 
 def fix_data(df, channels_used):
 
+    # don't use these columns, don't even try
     df = df.drop(columns=['customerID','InternetService','PaymentMethod','MultipleLines','OnlineSecurity'])
+    # turn strings into numbers
     df = df.replace({'Yes': 1, 'No': 0, 'Female': 0, 'Male': 0, 'Month-to-month': 0, 'One year': 1, 'Two year': 2, 'No internet service' : 2})
+    # Handles missing space characters:
     df = df.apply(pd.to_numeric, errors='coerce')#.fillna(0))
+    # omit lines with missing entries: NaN, None, or NaT (not a time)
     df = df.dropna(subset=channels_used)
 
     return df[channels_used]
@@ -30,7 +35,7 @@ prediction_threshold = 0.2
 
 pca = PCA(n_components=2)
 # Load raw tabular data from a CSV file, here treat all channels for completeness
-df_full = pd.read_csv(r"WA_Fn-UseC_-Telco-Customer-Churn.csv")
+df_full = pd.read_csv(r'C:\Users\DanielS\.cache\kagglehub\datasets\maqeel732\wa-fn-usec-telco-customer-churn-csv\versions\1\WA_Fn-UseC_-Telco-Customer-Churn.csv')
 channels_used = ['tenure', 'MonthlyCharges', 'TotalCharges', 'Churn']
 df = fix_data(df_full, channels_used)
 
@@ -70,6 +75,81 @@ class ChurnMLP(nn.Module):
     def forward(self, x):
         return self.net(x)
 
+def assess_performance(test_predictions, y_test_tensor, df):
+
+    # Calculate classification accuracy
+    correct = (test_predictions == y_test_tensor).sum().item()
+    accuracy = correct / len(y_test_tensor)
+
+    preds = test_predictions.squeeze()
+    targets = y_test_tensor.squeeze()
+
+    # Create boolean masks for each class
+    churn_mask = (targets == 1.0)
+    not_churn_mask = (targets == 0.0)
+
+    # 1. Churn Accuracy (Recall for Class 1)
+    churn_correct = (preds[churn_mask] == 1.0).sum().item()
+    churn_total = churn_mask.sum().item()
+    churn_accuracy = churn_correct / churn_total if churn_total > 0 else 0.0
+
+    # 2. Not-Churn Accuracy (Recall for Class 0 / Specificity)
+    not_churn_correct = (preds[not_churn_mask] == 0.0).sum().item()
+    not_churn_total = not_churn_mask.sum().item()
+    not_churn_accuracy = not_churn_correct / not_churn_total if not_churn_total > 0 else 0.0
+
+    # 3. Overall Accuracy
+    overall_accuracy = (preds == targets).sum().item() / len(targets)
+
+    # Print Results
+    print("--- Class-wise Accuracy Breakdown ---")
+    churn_percentage = df['Churn'].mean() * 100
+
+    print(f"Total Dataset: {len(df)} rows")
+    print(f"Churned ('Yes'): {churn_percentage:.2f}%")
+    print(f"Overall Accuracy:       {overall_accuracy * 100:.2f}%")
+    print(f"Churn ('Yes') Accuracy:    {churn_accuracy * 100:.2f}% ({churn_correct}/{churn_total} caught)")
+    print(f"Not Churn ('No') Accuracy: {not_churn_accuracy * 100:.2f}% ({not_churn_correct}/{not_churn_total} caught)")
+
+    # Print direct sample predictions
+    print("--- Sample Predictions ---")
+    print("Raw Probabilities (First 5):", test_probabilities[:5].squeeze().tolist())
+    print("Predicted Classes (First 5):", test_predictions[:5].squeeze().tolist())
+    print("Actual Ground Truth (First 5):", y_test_tensor[:5].squeeze().tolist())
+    print(f"\nOverall Test Accuracy: {accuracy * 100:.2f}%")
+
+    # plt.plot((test_predictions*1.1).squeeze().tolist(),'o-')
+    # plt.plot(y_test_tensor.squeeze().tolist(),'ro-')
+    # plt.legend(['test','GT'])
+    # plt.show()
+
+def analyze_layers(model):
+    # W1 shape: (16, 3), W2 shape: (1, 16)
+    # model.net[1] is the RELU layer
+    W1 = model.net[0].weight.detach().cpu().numpy()
+    W2 = model.net[2].weight.detach().numpy().squeeze()
+
+    # Calculate average absolute importance per input feature
+    feature_names = ['tenure', 'MonthlyCharges', 'TotalCharges']
+    mean_abs_weights = np.abs(W1).mean(axis=0)
+
+    print("--- Level 1: First-Layer Feature Influence ---")
+    for name, importance in zip(feature_names, mean_abs_weights):
+        print(f"Feature: {name:<15} | Avg |W1|: {importance:.4f}")
+
+    print("--- Level 2: Hidden Unit Role Decomposition ---")
+    for i in range(hidden_nodes):
+        w2_val = W2[i] # Contribution of unit i to output logit
+        # Only inspect active neurons that strongly push prediction positive or negative
+        if abs(w2_val) > 0.2:
+            direction = "Pushes CHURN" if w2_val > 0 else "Pushes RETAIN"
+            # weight this hidden neuron has in outcome
+            print(f"Neuron {i:02d} ({direction} | W2={w2_val:+.2f}):")
+            # weights of 3 inputs in this hidden neuron
+            # if tenure is short and bill is high, high risk
+            print(f"   <- W1 weights: tenure={W1[i,0]:+.2f}, Monthly={W1[i,1]:+.2f}, Total={W1[i,2]:+.2f}")
+
+
 model = ChurnMLP(input_dim=X_train.shape[1])
 criterion = nn.BCEWithLogitsLoss()
 optimizer = optim.Adam(model.parameters(), lr=0.01)
@@ -101,79 +181,13 @@ with torch.no_grad(): # Disable gradient computation for speed & memory efficien
     # Get continuous probability outputs (between 0.0 and 1.0)
     test_probabilities = model(X_test_tensor)
     
-    # Convert probabilities to discrete binary predictions (0 or 1) using a 0.5 threshold
-    test_predictions = (test_probabilities >= prediction_threshold).float()
-    
-    # Calculate classification accuracy
-    correct = (test_predictions == y_test_tensor).sum().item()
-    accuracy = correct / len(y_test_tensor)
+# Convert probabilities to discrete binary predictions (0 or 1) using a 0.5 threshold
+test_predictions = (test_probabilities >= prediction_threshold).float()
 
-    preds = test_predictions.squeeze()
-    targets = y_test_tensor.squeeze()
-
-    # Create boolean masks for each class
-    churn_mask = (targets == 1.0)
-    not_churn_mask = (targets == 0.0)
-
-    # 1. Churn Accuracy (Recall for Class 1)
-    churn_correct = (preds[churn_mask] == 1.0).sum().item()
-    churn_total = churn_mask.sum().item()
-    churn_accuracy = churn_correct / churn_total if churn_total > 0 else 0.0
-
-    # 2. Not-Churn Accuracy (Recall for Class 0 / Specificity)
-    not_churn_correct = (preds[not_churn_mask] == 0.0).sum().item()
-    not_churn_total = not_churn_mask.sum().item()
-    not_churn_accuracy = not_churn_correct / not_churn_total if not_churn_total > 0 else 0.0
-
-    # 3. Overall Accuracy
-    overall_accuracy = (preds == targets).sum().item() / len(targets)
-
-# Print Results
-print("--- Class-wise Accuracy Breakdown ---")
-churn_percentage = df['Churn'].mean() * 100
-
-print(f"Total Dataset: {len(df)} rows")
-print(f"Churned ('Yes'): {churn_percentage:.2f}%")
-print(f"Overall Accuracy:       {overall_accuracy * 100:.2f}%")
-print(f"Churn ('Yes') Accuracy:    {churn_accuracy * 100:.2f}% ({churn_correct}/{churn_total} caught)")
-print(f"Not Churn ('No') Accuracy: {not_churn_accuracy * 100:.2f}% ({not_churn_correct}/{not_churn_total} caught)")
-
-# Print direct sample predictions
-print("--- Sample Predictions ---")
-print("Raw Probabilities (First 5):", test_probabilities[:5].squeeze().tolist())
-print("Predicted Classes (First 5):", test_predictions[:5].squeeze().tolist())
-print("Actual Ground Truth (First 5):", y_test_tensor[:5].squeeze().tolist())
-print(f"\nOverall Test Accuracy: {accuracy * 100:.2f}%")
-
-# plt.plot((test_predictions*1.1).squeeze().tolist(),'o-')
-# plt.plot(y_test_tensor.squeeze().tolist(),'ro-')
-# plt.legend(['test','GT'])
-# plt.show()
-
-# W1 shape: (16, 3), W2 shape: (1, 16)
-# model.net[1] is the RELU layer
-W1 = model.net[0].weight.detach().cpu().numpy()
-W2 = model.net[2].weight.detach().numpy().squeeze()
-
-# Calculate average absolute importance per input feature
-feature_names = ['tenure', 'MonthlyCharges', 'TotalCharges']
-mean_abs_weights = np.abs(W1).mean(axis=0)
-
-print("--- Level 1: First-Layer Feature Influence ---")
-for name, importance in zip(feature_names, mean_abs_weights):
-    print(f"Feature: {name:<15} | Avg |W1|: {importance:.4f}")
-
-print("--- Level 2: Hidden Unit Role Decomposition ---")
-for i in range(hidden_nodes):
-    w2_val = W2[i] # Contribution of unit i to output logit
-    # Only inspect active neurons that strongly push prediction positive or negative
-    if abs(w2_val) > 0.2:
-        direction = "Pushes CHURN" if w2_val > 0 else "Pushes RETAIN"
-        # weight this hidden neuron has in outcome
-        print(f"Neuron {i:02d} ({direction} | W2={w2_val:+.2f}):")
-        # weights of 3 inputs in this hidden neuron
-        # if tenure is short and bill is high, high risk
-        print(f"   <- W1 weights: tenure={W1[i,0]:+.2f}, Monthly={W1[i,1]:+.2f}, Total={W1[i,2]:+.2f}")
+with open("output.txt", "w") as f:
+    with redirect_stdout(f):
+        assess_performance(test_predictions, y_test_tensor, df)
+        analyze_layers(model)
 
 # 1. Create a hook or sub-model to extract 16-D hidden layer activations
 sub_model = nn.Sequential(*list(model.net.children())[:2]) # Keeps Linear(3,16) + ReLU

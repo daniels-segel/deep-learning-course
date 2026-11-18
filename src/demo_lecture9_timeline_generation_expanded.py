@@ -294,23 +294,21 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 @torch.no_grad()
-def sample_diffusion_trajectory(model, n_steps, shape, betas, alphas, alphas_cumprod):
+def sample_diffusion(model, n_steps, shape, betas, alphas, alphas_cumprod, return_trajectory=False, n_snapshots=10):
     """
-    Runs the reverse diffusion process and records intermediate states 
-    to visualize how the timeline develops from noise.
+    Unified diffusion sampling function. 
+    Can either return just the final sample or record intermediate states for visualization.
     """
     device = next(model.parameters()).device
     
     # 1. Start from pure Gaussian noise (Step T)
     x = torch.randn(shape, device=device)
     
-    # Select specific iterations to save for visualization (e.g., 10 snapshots)
-    save_steps = set(torch.linspace(n_steps - 1, 0, steps=10).long().tolist())
     trajectory = []
-    
-    # Save the initial noise state
-    if (n_steps - 1) in save_steps:
-        trajectory.append((n_steps - 1, x.detach().cpu().numpy()))
+    if return_trajectory:
+        save_steps = set(torch.linspace(n_steps - 1, 0, steps=n_snapshots).long().tolist())
+        if (n_steps - 1) in save_steps:
+            trajectory.append((n_steps - 1, x.detach().cpu().numpy()))
     
     # 2. Reverse loop from T down to 1
     for i in reversed(range(n_steps)):
@@ -319,7 +317,7 @@ def sample_diffusion_trajectory(model, n_steps, shape, betas, alphas, alphas_cum
         # Model predicts the noise added at step i
         predicted_noise = model(x, t)
         
-        # Standard DDPM reverse coefficients
+        # Index schedule tensors for the current step [i]
         alpha = alphas[i]
         alpha_cumprod = alphas_cumprod[i]
         beta = betas[i]
@@ -334,11 +332,13 @@ def sample_diffusion_trajectory(model, n_steps, shape, betas, alphas, alphas_cum
         coef2 = (1.0 - alpha) / torch.sqrt(1.0 - alpha_cumprod)
         x = coef1 * (x - coef2 * predicted_noise) + torch.sqrt(beta) * noise
         
-        # Capture snapshot if it's a designated visualization step
-        if i in save_steps or i == 0:
+        # Capture snapshot if requested
+        if return_trajectory and (i in save_steps or i == 0):
             trajectory.append((i, x.detach().cpu().numpy()))
             
-    return trajectory
+    if return_trajectory:
+        return x, trajectory
+    return x
 
 def plot_trajectory_evolution(trajectory, channel_idx=0):
     """
@@ -384,18 +384,6 @@ TIMESTEPS = 100
 beta = torch.linspace(0.0001, 0.02, TIMESTEPS)
 alpha = 1.0 - beta
 alpha_cumprod = torch.cumprod(alpha, dim=0)
-
-@torch.no_grad()
-def sample_diffusion(model, shape, device):
-    model.eval()
-    x = torch.randn(shape, device=device)
-    for i in reversed(range(TIMESTEPS)):
-        t = torch.full((shape[0],), i, device=device, dtype=torch.long)
-        pred_noise = model(x, t)
-        a_t, a_cum_t, b_t = alpha[i], alpha_cumprod[i], beta[i]
-        noise = torch.randn_like(x) if i > 0 else torch.zeros_like(x)
-        x = (1.0 / torch.sqrt(a_t)) * (x - (b_t / torch.sqrt(1.0 - a_cum_t)) * pred_noise) + torch.sqrt(b_t) * noise
-    return x
 
 @torch.no_grad()
 def sample_vae(model, num_samples, in_channels, seq_len, device, latent_dim=32):
@@ -482,28 +470,31 @@ if __name__ == "__main__":
     # Step 4: Generation / Reconstruction
     print("\nGenerating/Reconstructing samples for evaluation...")
     if MODEL_CHOICE == 'diffusion':
-        generated_samples = sample_diffusion(model, (3, in_channels, SEQ_LEN), device)
+        sample_shape = (3, in_channels, SEQ_LEN)
+#        generated_samples = sample_diffusion(model, sample_shape, device)
+        generated_samples = sample_diffusion(model, TIMESTEPS, sample_shape, beta, alpha, alpha_cumprod, return_trajectory=False)
 
                 # Example configuration values (match whatever you used during training)
         #N_CHANNELS = 14  # e.g., number of C-MAPSS sensor channels
-        n_channels = generated_samples.shape[1]
+        n_channels = sample_shape[1]
         shape = (BATCH_SIZE, n_channels, SEQ_LEN)
 
         # 1. Put your trained model into evaluation mode
         model.eval()
 
         # 2. Run the trajectory sampler to capture evolution steps
-        trajectory = sample_diffusion_trajectory(
+        final_samples, trajectory = sample_diffusion(
             model=model, 
             n_steps=TIMESTEPS, 
             shape=shape, 
             betas=beta,           # Your pre-defined beta schedule tensor
             alphas=alpha,         # Your pre-defined alpha schedule tensor
-            alphas_cumprod=alpha_cumprod  # Your pre-defined cumulative alpha tensor
+            alphas_cumprod=alpha_cumprod,
+            return_trajectory=True  # Your pre-defined cumulative alpha tensor
         )
 
         # 3. Visualize how the noise shaped itself into a telemetry window
-        plot_trajectory_evolution(trajectory, channel_idx=2)
+        plot_trajectory_evolution(trajectory, channel_idx=0)
     elif MODEL_CHOICE == 'ae' or MODEL_CHOICE == 'unet' or MODEL_CHOICE == 'unet_slim':
         model.eval()
         with torch.no_grad():

@@ -88,11 +88,11 @@ if __name__ == "__main__":
     print(f"Output shape: {output.shape}")
 
 
-import struct
+# import struct
 
-record_format = struct.Struct("<i f 16s")  # int32, float32, 16-byte string (little-endian)
+# record_format = struct.Struct("<i f 16s")  # int32, float32, 16-byte string (little-endian)
 
-with open("data.bin", "rb") as file:
-    while chunk := file.read(record_format.size):
-        id_num, score, name = record_format.unpack(chunk)
-        print(f"ID: {id_num}, Score: {score:.2f}, Name: {name.decode().rstrip(chr(0))}")
+# with open("data.bin", "rb") as file:
+#     while chunk := file.read(record_format.size):
+#         id_num, score, name = record_format.unpack(chunk)
+#         print(f"ID: {id_num}, Score: {score:.2f}, Name: {name.decode().rstrip(chr(0))}")

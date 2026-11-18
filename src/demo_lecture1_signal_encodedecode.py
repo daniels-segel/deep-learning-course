@@ -45,6 +45,7 @@ x_test_anomaly = torch.tensor(X_test_anomaly)
 
 # 2. Define Autoencoder Architecture
 class SignalAutoencoder(nn.Module):
+
     def __init__(self):
         super().__init__() # sets up all data structures, settings, hooks
         self.encoder = nn.Sequential(
