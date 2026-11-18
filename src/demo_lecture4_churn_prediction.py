@@ -57,6 +57,8 @@ def read_data_advanced(data_input_file):
     X_raw = df_encoded.drop(columns=['Churn']).values.astype(np.float32)
     y_raw = df_encoded['Churn'].values.astype(np.float32)
 
+    return df, X_raw, y_raw
+
 
 # ==========================================
 # 2. MODEL DEFINITION & SETUP
@@ -218,10 +220,13 @@ def main():
     epochs = 100
     prediction_threshold = 0.2
     mode_advanced = False
+    mode_full_data = True
     pca = PCA(n_components=2)
-    out_string = 'basic'
-
-    df, X_raw, y_raw = read_data_basic(data_input_file)
+    out_string = 'basic_model_advanced_data'
+    if not mode_full_data:
+        df, X_raw, y_raw = read_data_basic(data_input_file)
+    else:
+        df, X_raw, y_raw = read_data_advanced(data_input_file)
 
     # Train/Test Split
     # stratify=y_raw in train_test_split: Guarantees that both y_train_t and y_test_t preserve the exact same 26.5% churn ratio
